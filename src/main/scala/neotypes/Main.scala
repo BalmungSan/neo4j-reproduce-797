@@ -14,12 +14,12 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NoStackTrace
 
 object Main {
-  implicit final val ec =
+  implicit val ec =
     ExecutionContext.fromExecutorService(
       Executors.newSingleThreadExecutor()
     )
 
-  implicit private val system =
+  implicit val system =
     ActorSystem(
       name = "QuickStart",
       defaultExecutionContext = Some(ec)
@@ -38,7 +38,7 @@ object Main {
 
     val neotypesSession = new NeotypesSession(driver.rxSession)
 
-    def loop(attempts: Int): Future[Boolean] = {
+    def loop(attempts: Int): Future[Unit] = {
       println()
       println("--------------------------------------------------")
       println(s"Remaining attempts ${attempts}")
@@ -47,37 +47,33 @@ object Main {
       neotypesSession.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
         println(s"Results: ${r}")
         if (attempts > 0) loop(attempts - 1)
-        else Future.successful(true)
+        else Future.unit
       }
     }
 
-    val app = neotypesSession.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })").flatMap { _ =>
+    def setup: Future[Unit] =
+      for {
+        _ <- neotypesSession.run("MATCH (n) DETACH DELETE n")
+        _ <- neotypesSession.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
+      } yield ()
+
+    val app = setup.flatMap { _ =>
       loop(attempts = 1000)
     } recover {
       case NoTransactionError =>
-        false
+        println(s"Transaction was not created!")
 
       case ex =>
         println(s"Unexpected error ${ex.getMessage}")
         ex.printStackTrace()
-        true
-    } flatMap { result =>
-      for {
-        _ <- neotypesSession.run("MATCH (n) DETACH DELETE n")
-        _ <- system.terminate()
-      } yield result
     }
 
-    val result = Await.result(app, Duration.Inf)
+    Await.ready(app.flatMap(_ => system.terminate()), Duration.Inf)
     println()
     println("-------------------------------------------------")
     println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
     driver.close()
     ec.shutdown()
-    println()
-    println("-------------------------------------------------")
-    if (result) println("------------ It worked! -------------")
-    else println("------------ It failed! -------------")
   }
 }
 
@@ -100,13 +96,11 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
             .toMap
         }.single
 
-    Future.delegate {
-      for {
-        tx <- session.beginTransaction.toStream.single.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
-        result <- runQuery(tx)
-        _ <- tx.commit[Unit].toStream.void
-      } yield result
-    }
+    for {
+      tx <- session.beginTransaction.toStream.single.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
+      result <- runQuery(tx)
+      _ <- tx.commit[Unit].toStream.void
+    } yield result
   }
 }
 
