@@ -42,6 +42,7 @@ object Main {
       println()
       println("--------------------------------------------------")
       println(s"Remaining attempts ${attempts}")
+      println(s"Metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
 
       neotypesSession.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
         println(s"Results: ${r}")
@@ -70,6 +71,7 @@ object Main {
     val result = Await.result(app, Duration.Inf)
     println()
     println("-------------------------------------------------")
+    println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
     driver.close()
     ec.shutdown()
     println()
@@ -80,9 +82,7 @@ object Main {
 }
 
 final class NeotypesSession (session: neo4j.reactive.RxSession)
-                            (implicit mat: Materializer) {
-  implicit val ec = mat.executionContext
-
+                            (implicit ec: ExecutionContext, mat: Materializer) {
   import Syntax._
 
   def run(query: String): Future[Option[Map[String, String]]] = {
@@ -100,11 +100,13 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
             .toMap
         }.single
 
-    for {
-      tx <- session.beginTransaction.toStream.single.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
-      result <- runQuery(tx)
-      _ <- tx.commit[Unit].toStream.void
-    } yield result
+    Future.delegate {
+      for {
+        tx <- session.beginTransaction.toStream.single.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
+        result <- runQuery(tx)
+        _ <- tx.commit[Unit].toStream.void
+      } yield result
+    }
   }
 }
 
