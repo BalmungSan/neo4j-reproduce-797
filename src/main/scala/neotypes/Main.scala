@@ -53,7 +53,13 @@ object Main {
     val app = neotypesSession.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })").flatMap { _ =>
       loop(attempts = 1000)
     } recover {
-      case NoTransactionError => false
+      case NoTransactionError =>
+        false
+
+      case ex =>
+        println(s"Unexpected error ${ex.getMessage}")
+        ex.printStackTrace()
+        true
     } flatMap { result =>
       for {
         _ <- neotypesSession.run("MATCH (n) DETACH DELETE n")
