@@ -1,9 +1,7 @@
 package neotypes
 
-import akka.NotUsed
-import akka.actor.ActorSystem
-import akka.stream.Materializer
-import akka.stream.scaladsl.{Sink, Source}
+import cats.effect.{ContextShift, IO}
+import fs2.Stream
 import org.neo4j.{driver => neo4j}
 import org.reactivestreams.Publisher
 
@@ -19,11 +17,8 @@ object Main {
       Executors.newSingleThreadExecutor()
     )
 
-  implicit val system =
-    ActorSystem(
-      name = "QuickStart",
-      defaultExecutionContext = Some(ec)
-    )
+  implicit val cs =
+    IO.contextShift(ec)
 
   def main(args: Array[String]): Unit = {
     val driver =
@@ -68,7 +63,7 @@ object Main {
         ex.printStackTrace()
     }
 
-    Await.ready(app.flatMap(_ => system.terminate()), Duration.Inf)
+    Await.ready(app, Duration.Inf)
     println()
     println("-------------------------------------------------")
     println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
@@ -78,11 +73,11 @@ object Main {
 }
 
 final class NeotypesSession (session: neo4j.reactive.RxSession)
-                            (implicit ec: ExecutionContext, mat: Materializer) {
+                            (implicit cs: ContextShift[IO]) {
   import Syntax._
 
   def run(query: String): Future[Option[Map[String, String]]] = {
-    def runQuery(tx: neo4j.reactive.RxTransaction): Future[Option[Map[String, String]]] =
+    def runQuery(tx: neo4j.reactive.RxTransaction): IO[Option[Map[String, String]]] =
       tx
         .run(query)
         .records
@@ -96,29 +91,31 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
             .toMap
         }.single
 
-    for {
-      tx <- session.beginTransaction.toStream.single.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
+    val io = for {
+      tx <- session.beginTransaction.toStream.single.flatMap(o => IO.fromOption(o)(orElse = NoTransactionError))
       result <- runQuery(tx)
       _ <- tx.commit[Unit].toStream.void
     } yield result
+
+    io.unsafeToFuture()
   }
 }
 
 object Syntax {
   implicit final class PublisherOps[A] (private val publisher: Publisher[A]) extends AnyVal {
-    def toStream: Source[A, NotUsed] =
-      Source.fromPublisher(publisher)
+    def toStream(implicit cs: ContextShift[IO]): Stream[IO, A] =
+      fs2.interop.reactivestreams.fromPublisher[IO, A](publisher)
   }
 
-  implicit final class StreamOps[A] (private val sa: Source[A, NotUsed]) extends AnyVal {
-    def list(implicit mat: Materializer): Future[Seq[A]] =
-      sa.runWith(Sink.seq)
+  implicit final class StreamOps[A] (private val sa: Stream[IO, A]) {
+    def list: IO[Seq[A]] =
+      sa.compile.toList
 
-    def single(implicit mat: Materializer): Future[Option[A]] =
-      sa.take(1).runWith(Sink.lastOption)
+    def single: IO[Option[A]] =
+      sa.take(1).compile.last
 
-    def void(implicit mat: Materializer, ec: ExecutionContext): Future[Unit] =
-      sa.runWith(Sink.ignore).map(_ => ())
+    def void: IO[Unit] =
+      sa.compile.drain
   }
 }
 
