@@ -1,26 +1,18 @@
 package neotypes
 
-import cats.effect.{ContextShift, IO}
+import cats.effect.{ContextShift, ExitCode, IO, IOApp}
+import cats.syntax.all._
 import fs2.Stream
 import org.neo4j.{driver => neo4j}
 import org.reactivestreams.Publisher
 
 import java.util.concurrent.Executors
-import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration.Duration
 import scala.jdk.CollectionConverters._
 import scala.util.control.NoStackTrace
 
-object Main {
-  implicit val ec =
-    ExecutionContext.fromExecutorService(
-      Executors.newSingleThreadExecutor()
-    )
-
-  implicit val cs =
-    IO.contextShift(ec)
-
-  def main(args: Array[String]): Unit = {
+object Main extends IOApp {
+  override def run(args: List[String]): IO[ExitCode] = {
     val driver =
       neo4j.GraphDatabase.driver(
         "bolt://localhost:7687",
@@ -33,7 +25,7 @@ object Main {
 
     val neotypesSession = new NeotypesSession(driver.rxSession)
 
-    def loop(attempts: Int): Future[Unit] = {
+    def loop(attempts: Int): IO[Unit] = {
       println()
       println("--------------------------------------------------")
       println(s"Remaining attempts ${attempts}")
@@ -42,19 +34,17 @@ object Main {
       neotypesSession.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
         println(s"Results: ${r}")
         if (attempts > 0) loop(attempts - 1)
-        else Future.unit
+        else IO.unit
       }
     }
 
-    def setup: Future[Unit] =
+    def setup: IO[Unit] =
       for {
         _ <- neotypesSession.run("MATCH (n) DETACH DELETE n")
         _ <- neotypesSession.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
       } yield ()
 
-    val app = setup.flatMap { _ =>
-      loop(attempts = 1000)
-    } recover {
+    val app = (setup *> loop(attempts = 1000)).recover {
       case NoTransactionError =>
         println(s"Transaction was not created!")
 
@@ -63,12 +53,16 @@ object Main {
         ex.printStackTrace()
     }
 
-    Await.ready(app, Duration.Inf)
-    println()
-    println("-------------------------------------------------")
-    println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
-    driver.close()
-    ec.shutdown()
+    val program =
+      app *>
+      IO {
+        println()
+        println("-------------------------------------------------")
+        println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
+      } *>
+      IO(driver.close())
+
+    program.as(ExitCode.Success)
   }
 }
 
@@ -76,7 +70,7 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
                             (implicit cs: ContextShift[IO]) {
   import Syntax._
 
-  def run(query: String): Future[Option[Map[String, String]]] = {
+  def run(query: String): IO[Option[Map[String, String]]] = {
     def runQuery(tx: neo4j.reactive.RxTransaction): IO[Option[Map[String, String]]] =
       tx
         .run(query)
@@ -93,13 +87,11 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
           }
         }
 
-    val io = for {
+    for {
       tx <- session.beginTransaction.toIO.flatMap(o => IO.fromOption(o)(orElse = NoTransactionError))
       result <- runQuery(tx)
       _ <- tx.commit[Unit].toIO
     } yield result
-
-    io.unsafeToFuture()
   }
 }
 
