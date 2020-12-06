@@ -81,20 +81,22 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
       tx
         .run(query)
         .records
-        .toStream
-        .map { record =>
-          record
-            .fields
-            .asScala
-            .iterator
-            .map(p => p.key -> p.value.toString)
-            .toMap
-        }.single
+        .toIO
+        .map { recordOption =>
+          recordOption.map { record =>
+            record
+              .fields
+              .asScala
+              .iterator
+              .map(p => p.key -> p.value.toString)
+              .toMap
+          }
+        }
 
     val io = for {
-      tx <- session.beginTransaction.toStream.single.flatMap(o => IO.fromOption(o)(orElse = NoTransactionError))
+      tx <- session.beginTransaction.toIO.flatMap(o => IO.fromOption(o)(orElse = NoTransactionError))
       result <- runQuery(tx)
-      _ <- tx.commit[Unit].toStream.void
+      _ <- tx.commit[Unit].toIO
     } yield result
 
     io.unsafeToFuture()
@@ -103,19 +105,8 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
 
 object Syntax {
   implicit final class PublisherOps[A] (private val publisher: Publisher[A]) extends AnyVal {
-    def toStream(implicit cs: ContextShift[IO]): Stream[IO, A] =
-      fs2.interop.reactivestreams.fromPublisher[IO, A](publisher)
-  }
-
-  implicit final class StreamOps[A] (private val sa: Stream[IO, A]) {
-    def list: IO[Seq[A]] =
-      sa.compile.toList
-
-    def single: IO[Option[A]] =
-      sa.take(1).compile.last
-
-    def void: IO[Unit] =
-      sa.compile.drain
+    def toIO(implicit cs: ContextShift[IO]): IO[Option[A]] =
+      fs2.interop.reactivestreams.fromPublisher[IO, A](publisher).take(1).compile.last
   }
 }
 
