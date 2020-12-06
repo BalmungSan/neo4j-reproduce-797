@@ -86,39 +86,30 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
       tx
         .run(query)
         .records
-        .toStream
-        .map { record =>
-          record
-            .fields
-            .asScala
-            .iterator
-            .map(p => p.key -> p.value.toString)
-            .toMap
-        }.single
+        .toFuture
+        .map { recordOption =>
+          recordOption.map { record =>
+            record
+              .fields
+              .asScala
+              .iterator
+              .map(p => p.key -> p.value.toString)
+              .toMap
+          }
+        }
 
     for {
-      tx <- session.beginTransaction.toStream.single.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
+      tx <- session.beginTransaction.toFuture.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
       result <- runQuery(tx)
-      _ <- tx.commit[Unit].toStream.void
+      _ <- tx.commit[Unit].toFuture
     } yield result
   }
 }
 
 object Syntax {
   implicit final class PublisherOps[A] (private val publisher: Publisher[A]) extends AnyVal {
-    def toStream: Source[A, NotUsed] =
-      Source.fromPublisher(publisher)
-  }
-
-  implicit final class StreamOps[A] (private val sa: Source[A, NotUsed]) extends AnyVal {
-    def list(implicit mat: Materializer): Future[Seq[A]] =
-      sa.runWith(Sink.seq)
-
-    def single(implicit mat: Materializer): Future[Option[A]] =
-      sa.take(1).runWith(Sink.lastOption)
-
-    def void(implicit mat: Materializer, ec: ExecutionContext): Future[Unit] =
-      sa.runWith(Sink.ignore).map(_ => ())
+    def toFuture(implicit mat: Materializer): Future[Option[A]] =
+      Source.fromPublisher(publisher).take(1).runWith(Sink.lastOption)
   }
 }
 
