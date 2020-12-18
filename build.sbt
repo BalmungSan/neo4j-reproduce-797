@@ -12,3 +12,6 @@ libraryDependencies ++= Seq(
   "co.fs2" %% "fs2-reactive-streams" % fs2Version,
   "ch.qos.logback" % "logback-classic" % logbackVersion
 )
+
+Compile / run / fork := true
+Compile / run / javaOptions += "-XX:ActiveProcessorCount=1"

@@ -4,12 +4,10 @@ This repository contains the necessary files to reproduce the [#797](https://git
 
 ## Steps to reproduce
 
-1. Run this code on an AWS or Azure instance that has **Java** installed.
-
-2. Run a **neo4j** server in background. For example, using **Docker**:
+1. Run a **neo4j** server in background. For example, using **Docker**:
 
 > docker run -d -p7687:7687 --env=NEO4J_AUTH=none neo4j:4.2.1
 
-3. Run the following command:
+2. Run the following command:
 
 > ./sbt run

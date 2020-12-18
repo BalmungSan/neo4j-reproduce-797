@@ -1,6 +1,6 @@
 package neotypes
 
-import cats.effect.{ContextShift, ExitCode, IO, IOApp}
+import cats.effect.{ContextShift, ExitCase, ExitCode, IO, IOApp}
 import cats.syntax.all._
 import fs2.Stream
 import org.neo4j.{driver => neo4j}
@@ -23,7 +23,7 @@ object Main extends IOApp {
           .build()
       )
 
-    val neotypesSession = new NeotypesSession(driver.rxSession)
+    val neotypesDriver = new NeotypesDriver(driver)
 
     def loop(attempts: Int): IO[Unit] = {
       println()
@@ -31,7 +31,7 @@ object Main extends IOApp {
       println(s"Remaining attempts ${attempts}")
       println(s"Metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
 
-      neotypesSession.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
+      neotypesDriver.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
         println(s"Results: ${r}")
         if (attempts > 0) loop(attempts - 1)
         else IO.unit
@@ -40,8 +40,8 @@ object Main extends IOApp {
 
     def setup: IO[Unit] =
       for {
-        _ <- neotypesSession.run("MATCH (n) DETACH DELETE n")
-        _ <- neotypesSession.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
+        _ <- neotypesDriver.run("MATCH (n) DETACH DELETE n")
+        _ <- neotypesDriver.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
       } yield ()
 
     val app = (setup *> loop(attempts = 1000)).recover {
@@ -66,39 +66,48 @@ object Main extends IOApp {
   }
 }
 
-final class NeotypesSession (session: neo4j.reactive.RxSession)
-                            (implicit cs: ContextShift[IO]) {
+final class NeotypesDriver(driver: neo4j.Driver)
+                          (implicit cs: ContextShift[IO]) {
   import Syntax._
 
   def run(query: String): IO[Option[Map[String, String]]] = {
-    def runQuery(tx: neo4j.reactive.RxTransaction): IO[Option[Map[String, String]]] =
+    val session = driver.rxSession
+    val txIO = session.beginTransaction.toStream.toIO.flatMap(opt => IO.fromOption(opt)(orElse = NoTransactionError))
+
+    val result = Stream.bracketCase(txIO) {
+      case (tx, ExitCase.Completed) => tx.commit[Unit].toStream.toIOUnit.flatMap(_ => session.close[Unit].toStream.toIOUnit)
+      case (tx, _)                  => tx.rollback[Unit].toStream.toIOUnit.flatMap(_ => session.close[Unit].toStream.toIOUnit)
+    } flatMap { tx =>
       tx
         .run(query)
         .records
-        .toIO
-        .map { recordOption =>
-          recordOption.map { record =>
-            record
-              .fields
-              .asScala
-              .iterator
-              .map(p => p.key -> p.value.toString)
-              .toMap
-          }
+        .toStream
+        .map { record =>
+          record
+            .fields
+            .asScala
+            .iterator
+            .map(p => p.key -> p.value.toString)
+            .toMap
         }
+    }
 
-    for {
-      tx <- session.beginTransaction.toIO.flatMap(o => IO.fromOption(o)(orElse = NoTransactionError))
-      result <- runQuery(tx)
-      _ <- tx.commit[Unit].toIO
-    } yield result
+    result.toIO
   }
 }
 
 object Syntax {
   implicit final class PublisherOps[A] (private val publisher: Publisher[A]) extends AnyVal {
-    def toIO(implicit cs: ContextShift[IO]): IO[Option[A]] =
-      fs2.interop.reactivestreams.fromPublisher[IO, A](publisher).take(1).compile.last
+    def toStream(implicit cs: ContextShift[IO]): Stream[IO, A] =
+      fs2.interop.reactivestreams.fromPublisher[IO, A](publisher)
+  }
+
+  implicit final class StreamOps[A] (private val stream: Stream[IO, A]) {
+    def toIO: IO[Option[A]] =
+      stream.take(1).compile.last
+
+    def toIOUnit: IO[Unit] =
+      stream.compile.drain
   }
 }
 
