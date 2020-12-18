@@ -26,7 +26,7 @@ object Main {
           .build()
       )
 
-    val neotypesSession = new NeotypesSession(driver.rxSession)
+    val neotypesDriver = new NeotypesDriver(driver)
 
     def loop(attempts: Int): Future[Unit] = {
       println()
@@ -34,7 +34,7 @@ object Main {
       println(s"Remaining attempts ${attempts}")
       println(s"Metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
 
-      neotypesSession.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
+      neotypesDriver.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
         println(s"Results: ${r}")
         if (attempts > 0) loop(attempts - 1)
         else Future.unit
@@ -43,8 +43,8 @@ object Main {
 
     def setup: Future[Unit] =
       for {
-        _ <- neotypesSession.run("MATCH (n) DETACH DELETE n")
-        _ <- neotypesSession.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
+        _ <- neotypesDriver.run("MATCH (n) DETACH DELETE n")
+        _ <- neotypesDriver.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
       } yield ()
 
     val app = setup.flatMap { _ =>
@@ -67,8 +67,8 @@ object Main {
   }
 }
 
-final class NeotypesSession (session: neo4j.reactive.RxSession)
-                            (implicit ec: ExecutionContext) {
+final class NeotypesDriver(driver: neo4j.Driver)
+                          (implicit ec: ExecutionContext) {
   import Syntax._
 
   def run(query: String): Future[Option[Map[String, String]]] = {
@@ -88,10 +88,13 @@ final class NeotypesSession (session: neo4j.reactive.RxSession)
           }
         }
 
+    val session = driver.rxSession
+
     for {
       tx <- session.beginTransaction.toFuture.transform(_.flatMap(_.toRight(left = NoTransactionError).toTry))
       result <- runQuery(tx)
       _ <- tx.commit[Unit].toFuture
+      _ <- session.close[Unit].toFuture
     } yield result
   }
 }

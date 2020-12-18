@@ -9,3 +9,6 @@ libraryDependencies ++= Seq(
   "org.neo4j.driver" % "neo4j-java-driver" % neo4jDriverVersion,
   "ch.qos.logback" % "logback-classic" % logbackVersion
 )
+
+Compile / run / fork := true
+Compile / run / javaOptions += "-XX:ActiveProcessorCount=1"
