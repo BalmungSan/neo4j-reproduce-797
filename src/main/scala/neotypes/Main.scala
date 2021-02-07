@@ -13,7 +13,7 @@ import scala.util.control.NoStackTrace
 
 object Main extends IOApp {
   override def run(args: List[String]): IO[ExitCode] = {
-    val driver =
+    IO {
       neo4j.GraphDatabase.driver(
         "bolt://localhost:7687",
         neo4j.Config.builder
@@ -22,47 +22,51 @@ object Main extends IOApp {
           .withLogging(neo4j.Logging.slf4j)
           .build()
       )
+    } flatMap { driver =>
+      val neotypesDriver = new NeotypesDriver(driver)
 
-    val neotypesDriver = new NeotypesDriver(driver)
-
-    def loop(attempts: Int): IO[Unit] = {
-      println()
-      println("--------------------------------------------------")
-      println(s"Remaining attempts ${attempts}")
-      println(s"Metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
-
-      neotypesDriver.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
-        println(s"Results: ${r}")
-        if (attempts > 0) loop(attempts - 1)
-        else IO.unit
-      }
-    }
-
-    def setup: IO[Unit] =
-      for {
-        _ <- neotypesDriver.run("MATCH (n) DETACH DELETE n")
-        _ <- neotypesDriver.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
-      } yield ()
-
-    val app = (setup *> loop(attempts = 1000)).recover {
-      case NoTransactionError =>
-        println(s"Transaction was not created!")
-
-      case ex =>
-        println(s"Unexpected error ${ex.getMessage}")
-        ex.printStackTrace()
-    }
-
-    val program =
-      app *>
-      IO {
+      def loop(attempts: Int): IO[Unit] = IO.suspend {
         println()
-        println("-------------------------------------------------")
-        println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
-      } *>
-      IO(driver.close())
+        println("--------------------------------------------------")
+        println(s"Remaining attempts ${attempts}")
+        println(s"Metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
 
-    program.as(ExitCode.Success)
+        neotypesDriver.run("MATCH (p: Person { name: 'Charlize Theron' }) RETURN p.name").flatMap { r =>
+          IO.suspend {
+            println(s"Results: ${r}")
+            if (attempts > 0) loop(attempts - 1)
+            else IO.unit
+          }
+        }
+      }
+
+      val setup: IO[Unit] =
+        for {
+          _ <- neotypesDriver.run("MATCH (n) DETACH DELETE n")
+          _ <- neotypesDriver.run("CREATE (Charlize: Person { name: 'Charlize Theron', born: 1975 })")
+        } yield ()
+
+      val app = (setup *> loop(attempts = 1000)).recoverWith {
+        case NoTransactionError =>
+          IO(println(s"Transaction was not created!"))
+
+        case ex => IO {
+          println(s"Unexpected error ${ex.getMessage}")
+          ex.printStackTrace()
+        }
+      }
+
+      val program =
+        app *>
+        IO {
+          println()
+          println("-------------------------------------------------")
+          println(s"Final metrics: ${driver.metrics.connectionPoolMetrics.asScala}")
+        } *>
+        IO(driver.close())
+
+      program.as(ExitCode.Success)
+    }
   }
 }
 
@@ -71,14 +75,18 @@ final class NeotypesDriver(driver: neo4j.Driver)
   import Syntax._
 
   def run(query: String): IO[Option[Map[String, String]]] = {
-    val session = driver.rxSession
-    val txIO = session.beginTransaction.toStream.toIO.flatMap(opt => IO.fromOption(opt)(orElse = NoTransactionError))
+    val txIO = for {
+      s <- IO(driver.rxSession)
+      opt <- s.beginTransaction.toStream.toIO
+      tx <- IO.fromOption(opt)(orElse = NoTransactionError)
+    } yield tx -> s
 
     val result = Stream.bracketCase(txIO) {
-      case (tx, ExitCase.Completed) => tx.commit[Unit].toStream.toIOUnit.flatMap(_ => session.close[Unit].toStream.toIOUnit)
-      case (tx, _)                  => tx.rollback[Unit].toStream.toIOUnit.flatMap(_ => session.close[Unit].toStream.toIOUnit)
+      case ((tx, s), ExitCase.Completed) => tx.commit[Unit].toStream.toIOUnit *> s.close[Unit].toStream.toIOUnit
+      case ((tx, s), _)                  => tx.rollback[Unit].toStream.toIOUnit *> s.close[Unit].toStream.toIOUnit
     } flatMap { tx =>
       tx
+        ._1
         .run(query)
         .records
         .toStream
