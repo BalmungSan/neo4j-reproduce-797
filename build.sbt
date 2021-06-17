@@ -1,10 +1,12 @@
 name := "neo4j-reproduce-797"
-scalaVersion := "2.13.4"
+scalaVersion := "2.13.6"
 organization := "neotypes"
 
-val neo4jDriverVersion = "4.2.0"
-val akkaStreamVersion = "2.6.10"
+val akkaStreamVersion = "2.6.15"
+val neo4jDriverVersion = "4.3-SNAPSHOT"
 val logbackVersion = "1.2.3"
+
+resolvers += Resolver.mavenLocal
 
 libraryDependencies ++= Seq(
   "org.neo4j.driver" % "neo4j-java-driver" % neo4jDriverVersion,
