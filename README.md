@@ -11,3 +11,7 @@ This repository contains the necessary files to reproduce the [#797](https://git
 2. Run the following command:
 
 > ./sbt run
+
+# FIXED!
+
+Thanks to [#932](https://github.com/neo4j/neo4j-java-driver/pull/932)!
